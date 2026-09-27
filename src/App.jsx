@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import mqtt from "mqtt";
 import {
   LineChart,
   Line,
@@ -10,7 +11,6 @@ import {
 } from "recharts";
 import "./App.css";
 
-const CHANNEL_ID = import.meta.env.VITE_THINGSPEAK_CHANNEL_ID;
 
 function getStatus(score) {
   if (score >= 80) return "GOOD";
@@ -38,77 +38,83 @@ function App() {
 
   const status = getStatus(score);
 
-  useEffect(() => {
-    let isMounted = true;
+    useEffect(() => {
+    const host = import.meta.env.VITE_MQTT_HOST;
+    const port = import.meta.env.VITE_MQTT_WS_PORT;
+    const username = import.meta.env.VITE_MQTT_USERNAME;
+    const password = import.meta.env.VITE_MQTT_PASSWORD;
+    const topic = import.meta.env.VITE_MQTT_TOPIC;
 
-    const fetchThingSpeakData = async () => {
+    const client = mqtt.connect(`wss://${host}:${port}/mqtt`, {
+      username,
+      password,
+      protocol: "wss",
+    });
+
+    client.on("connect", () => {
+      console.log("✅ MQTT Connected");
+
+      client.subscribe(topic, (error) => {
+        if (error) {
+          console.error("❌ MQTT subscription error:", error);
+        } else {
+          console.log("✅ Subscribed to:", topic);
+        }
+      });
+    });
+
+    client.on("message", (receivedTopic, payload) => {
+      console.log("📨 MQTT message received:", receivedTopic);
+
       try {
-        const url =
-  `https://api.thingspeak.com/channels/${CHANNEL_ID}/feeds.json` +
-  `?results=20`;
+        const data = JSON.parse(payload.toString());
 
-const response = await fetch(url);
+        const newAdc = Number(data.adc) || 0;
+        const newVoltage = Number(data.voltage) || 0;
+        const newScore = Number(data.score) || 0;
+        const newNh3 = Number(data.nh3) || 0;
+        const newCo2 = Number(data.co2) || 0;
+        const newSmoke = Number(data.smoke) || 0;
 
-        if (!response.ok) {
-          throw new Error(`ThingSpeak HTTP error: ${response.status}`);
-        }
+        setAdc(newAdc);
+        setVoltage(newVoltage);
+        setScore(newScore);
+        setNh3(newNh3);
+        setCo2(newCo2);
+        setSmoke(newSmoke);
 
-        const data = await response.json();
+        setSensorOnline(data.sensor === "ONLINE");
 
-        if (!data.feeds || data.feeds.length === 0) {
-          throw new Error("No ThingSpeak data found.");
-        }
+        const now = new Date();
 
-        const latest = data.feeds[data.feeds.length - 1];
+        setLastUpdate(now);
 
-        const newAdc = Number(latest.field1) || 0;
-        const newVoltage = Number(latest.field2) || 0;
-        const newScore = Number(latest.field3) || 0;
-        const newNh3 = Number(latest.field5) || 0;
-        const newCo2 = Number(latest.field6) || 0;
-        const newSmoke = Number(latest.field7) || 0;
+        setHistory((previousHistory) => [
+          ...previousHistory,
+          {
+            time: formatTime(now),
+            adc: newAdc,
+            score: newScore,
+          },
+        ].slice(-20));
 
-        const newHistory = data.feeds
-          .filter((feed) => feed.field1 !== null)
-          .map((feed) => ({
-            time: formatTime(feed.created_at),
-            adc: Number(feed.field1) || 0,
-            score: Number(feed.field3) || 0,
-          }));
-
-        if (isMounted) {
-          setAdc(newAdc);
-          setVoltage(newVoltage);
-          setScore(newScore);
-          setNh3(newNh3);
-          setCo2(newCo2);
-          setSmoke(newSmoke);
-          setHistory(newHistory);
-          setLastUpdate(new Date(latest.created_at));
-
-          // Field 8:
-          // 1 = ONLINE
-          // 0 = OFFLINE
-          setSensorOnline(Number(latest.field8) === 1);
-        }
       } catch (error) {
-        console.error("ThingSpeak connection error:", error);
-
-        if (isMounted) {
-          setSensorOnline(false);
-        }
+        console.error("❌ Invalid MQTT JSON:", error);
       }
-    };
+    });
 
-    // Fetch immediately
-    fetchThingSpeakData();
+    client.on("error", (error) => {
+      console.error("❌ MQTT connection error:", error);
+      setSensorOnline(false);
+    });
 
-    // ThingSpeak data will be refreshed every 15 seconds
-    const interval = setInterval(fetchThingSpeakData, 15000);
+    client.on("close", () => {
+      console.log("🔴 MQTT connection closed");
+      setSensorOnline(false);
+    });
 
     return () => {
-      isMounted = false;
-      clearInterval(interval);
+      client.end();
     };
   }, []);
 
@@ -315,7 +321,7 @@ const response = await fetch(url);
 
             <div className="info-row">
               <span>Data source</span>
-              <strong>ThingSpeak</strong>
+              <strong>HiveMQ MQTT</strong>
             </div>
           </div>
         </section>
